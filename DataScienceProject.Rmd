@@ -1,0 +1,455 @@
+---
+title: 'Data Science Term Project: Credit Card Fraud Detection with R'
+author: "Siddharth Pandit - 102289"
+date: "19 March 2017"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+# Introduction
+***
+The aim of this project is to develop and compare algorithms for predicting fradulent credit card transactions. We will use several predictors in order to be able to classify an incoming transaction as legitimate or fradulent. 
+  
+**What is credit card fraud?**
+
+*Credit card fraud is a wide-ranging term for theft and fraud committed using or involving a payment card, such as a credit card or debit card, as a fraudulent source of funds in a transaction. The purpose may be to obtain goods without paying, or to obtain unauthorized funds from an account.* - wikipedia.org
+
+
+
+**Why is fraud detection important?**   
+
+*Although incidence of credit card fraud is limited to about 0.1% of all card transactions, this has resulted in huge financial losses as the fraudulent transactions have been large value transactions. In 1999, out of 12 billion transactions made annually, approximately 10 million-or one out of every 1200 transactions-turned out to be fraudulent.[3] Also, 0.04% (4 out of every 10,000) of all monthly active accounts were fraudulent. Even with tremendous volume and value increase in credit card transactions since then, these proportions have stayed the same or have decreased due to sophisticated fraud detection and prevention systems.* - wikipedia.org
+  
+It is not hard to see why credit card fraud is such a nuisance and needs to be tackled effectively.
+
+    
+# Environment Setup
+***
+To initialize the workspace, we will load the data set called "creditcard.csv" and the following packages -
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+rm(list=ls())
+
+library(dplyr)
+library(ggplot2)
+library(RCurl)
+library(rmarkdown)
+library(knitr)
+library(stats4)
+library(stats)
+library(pander)
+library(NbClust)
+library(randomForest)
+library(ROCR)
+library(data.table)
+library(tidyr)
+library(gridExtra)
+library(PRROC)
+library(h2o)
+library(pander)
+library(data.table)
+
+data <- read.csv("creditcard.csv")
+data_t<-data.table(data)
+
+```  
+  
+  
+#The Data
+***
+
+## Description
+The dataset has been obtained from kaggle, where it is publically available.
+  
+  
+The dataset contains transactions made by credit cards in September 2013 by european cardholders. This dataset present transactions that occurred in two days, where we have 492 frauds out of 284,807 transactions. 
+  
+  
+It contains only numerical input variables which are the result of a PCA transformation. Unfortunately, due to confidentiality issues, the original features and background information about the data have been removed. Features V1, V2, ... V28 are the principal components obtained with PCA, the only features which have not been transformed with PCA are 'Time' and 'Amount'. Feature 'Time' contains the seconds elapsed between each transaction and the first transaction in the dataset. The feature 'Amount' is the transaction Amount.
+  
+    
+**Feature 'Class' is the response variable and it takes value 1 in case of fraud and 0 otherwise.**
+  
+    
+**Citation:** Andrea Dal Pozzolo, Olivier Caelen, Reid A. Johnson and Gianluca Bontempi. Calibrating Probability with Undersampling for Unbalanced Classification. In Symposium on Computational Intelligence and Data Mining (CIDM), IEEE, 2015
+***
+  
+  
+  
+## Exploratory Data Analysis
+***
+Now that we've established the question that we are looking to answer, we will go ahead and perform exploratory analysis to get an overview of the data we have at hand.
+  
+```{r}
+str(data)
+head(data)
+```
+
+However, as mentioned in the description, we have no information regarding the individual predictors and thus cannot make any comments on those. From the remaining two variables, we will use "Amount" to see if we can identify a pattern in the currency value of fradulent transactions.
+  
+  
+```{r warning=FALSE}
+ggplot(data, aes(x=as.factor(Class), y=Amount, color=as.factor(Class)))+
+  geom_boxplot()+
+  ylim(0, max(data$Amount[data$Class==1]))
+ggplot(data, aes(x=as.factor(Class), y=Amount, color=as.factor(Class)))+
+  geom_boxplot()+
+  ylim(0,100)
+```
+
+We can clearly see that majority of the transactions have a relatively low amount. **Perhaps, this is done to avoid raising suspicion by virtue of high monetary transactions being closely monitored by banks anyway.**
+  
+Similarly, we can also plot the Mean Amount (ma) of the fradulent transactions (1) across time to visualize the patterm and compare it with that of non-fradulent (0) transactions. We can clearly see that fradulent transactions have more distinct characteristics as compared to non-fradulent transactions.
+  
+```{r warning=FALSE}
+ggplot(data_t[,.(ma=mean(Amount)),by=.(Time%/%3000,Class)],aes(x=Time,y=ma))+geom_col(aes(fill=ma))+scale_fill_distiller(palette="Spectral")+facet_wrap(~Class)+ylab("Mean Amount")
+```
+  
+Most importantly, since this is a classification type problem, let us take a look at the distribution of our response variable.
+  
+```{r warning=FALSE}
+ggplot(data, aes(x = Class,y=log(..count..)), fill = "Green") + labs(y ="Frequency", title = "Distribution of Class variable (Log scale)") + geom_histogram(stat = "count",fill = "orange",binwidth = 1) + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+As can be seen above, there is a pretty significant imbalance in our dataset which is heavily skewed towards Class == 0, or non-fradulent transactions. This means that there are several thousand more non-fradulent transactions for every fradulent transaction. However, it is important to point out this is not an abberation but a characterisitic of such problems that we often see in the real world. Other examples of such problems are disk drive failures, factory manufacturing defects, and conversion rates of online advertisements, all of which have extremely skewed distributions.
+  
+Owing to this bias, the standard machine learning alorithms will not be able to make accurate predictions. Additional steps must be undertaken to counter this effect - 
+  
+* **Collect more data** - If possible, this is the best method. However, it is not possible in our case.
+* **Undersampling** - This method works with the majority class and reduces the number of observations in it to balance the data set.
+* **Oversampling** - This method works with the minority class and replicating observations from there to balance the data set.
+* **Synthetic data generation** - This method invovles creating artificial data instead of replication or undersampling.
+* **Cost Sensitive Learning** - It does not create balanced data distribution. Instead, it highlights the imbalanced learning problem by using cost matrices which describes the cost for misclassification in a particular scenario.
+* **Performance metrics** - If none of the methods seem suitable and one wishes to proceed with the original data set, it is also possible to use a different set of performance metrics that work in case of imbalances data sets 
+  
+In our case, we will use performance metrics such as ROC, AUC, and F MEASURE which are suitable for imbalanced data sets. Specifically, since this is detection of credit card fraud and we are concerned about False Negatives (missing fradulent transactions), we will rely on the f2 measure for comparing our models.
+  
+# Modeling
+***
+I used h2o for all machine learning activities. The initialization was done with the following parameters -
+  
+```{r message=FALSE, warning=FALSE, results="hide"}
+library(h2o)
+h2o.init(nthreads = 6)
+h2o.removeAll()
+```
+  
+The response variable "Class" is an integer type variable so I will convert it into factor using the following command - 
+```{r message=FALSE, warning=FALSE, results="hide"}
+data$Class <- as.factor(data$Class)
+```
+  
+The next step is to divide the data into training, validation, and test sets which is done in the following way proportion 60:20:20 -
+```{r message=FALSE, warning=FALSE, results="hide"}
+h2o_data<-as.h2o(data)
+h2o_data<- h2o.splitFrame(h2o_data, ratios = c(0.6,0.2),seed=1234)
+names(h2o_data) <- c("train", "valid", "test")
+```
+  
+After performing this division, we have `r attributes(h2o_data$train)$nrow`, `r attributes(h2o_data$valid)$nrow` and `r attributes(h2o_data$test)$nrow` observations in the training set, validation set and test set respectively. 
+  
+In the coming section, we will use Randon Forest, GBM, and NN Deep Learning with Cross Validation and Grid Search to optimize our models. In the end, we will use ROC, AUC, and F2 values to compare the models and choose the best fit for our problem.
+  
+## 1. Random Forest with Cross Validation
+I have used a grid search with Random Forest while varying max_depth and mtries. The number of trees selected is 100 and we have also applied k=5 cross validation.
+  
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+h2o.rm("RF")
+
+RF <- h2o.grid(
+  algorithm = "randomForest", 
+  grid_id = "RF",
+  hyper_params = list(max_depth=c(15,20,25),mtries=c(5,7,9)),
+  training_frame = h2o_data$train,
+  validation_frame = h2o_data$valid,
+  x=colnames(h2o_data$train)[-31],
+  y="Class",
+  seed=1234,
+  ntrees=100, nfolds=5
+)
+```
+  
+  
+The output of the grid search that gives us the best parameters for Random Forest can be obtained fromt he following section -
+  
+```{r message=FALSE, warning=FALSE}
+RFm<-h2o.getGrid(
+  grid_id = "RF", 
+  sort_by = "F2",
+  decreasing = TRUE
+)
+RFm
+RFb<- h2o.getModel(RFm@model_ids[[1]])
+
+```
+  
+The grid search for Random Forest reveals the sweet spot is `r RFb@parameters$max_depth` as max_depth and `r RFb@parameters$mtries` as mtries.
+  
+  
+The resulting performance metrics from the algorithm are -
+```{r message=FALSE, warning=FALSE}
+RFp<-h2o.performance(RFb,xval=T)
+RFrp<-cbind(h2o.fpr(RFp),h2o.tpr(RFp)$tpr)
+colnames(RFrp)[3]<-"tpr"
+RFt<-h2o.performance(RFb,newdata = h2o_data$test)
+RFrt<-cbind(h2o.fpr(RFt),h2o.tpr(RFt)$tpr)
+colnames(RFrt)[3]<-"tpr"
+```
+  
+Comparing the AUC of the two sets, we get `r round(h2o.auc(RFp),4)` for the validation set and `r round(h2o.auc(RFt),4)` for the test set.
+  
+The next set of graphs will show the F2 metric variation across the Threshold and the ROC curve -
+  
+```{r message=FALSE, warning=FALSE}
+RFev<-ggplot(h2o.F2(RFp))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+RFet<-ggplot(h2o.F2(RFt))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+RFav<-ggplot(RFrp,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+RFat<-ggplot(RFrt,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+```
+  
+```{r fig.cap="F2-Threshold curve and ROC curve for validation set"}
+grid.arrange(RFev,RFav,ncol=1)
+```
+```{r fig.cap="F2-Threshold curve and ROC curve for test set"}
+grid.arrange(RFet,RFat,ncol=1)
+```
+  
+Let us also take a look at the confusion matrix of the validation and test sets, respectively.  
+  
+  
+Validation set:  
+```{r }
+pander(h2o.confusionMatrix(RFp,metrics="f2")[,1:3])
+``` 
+  
+Test set:  
+```{r }
+pander(h2o.confusionMatrix(RFt,metrics="f2")[,1:3])
+```
+  
+As can be seen from the confusion matrix of the test set, we failed to identify `r round(h2o.confusionMatrix(RFt,metrics="f2")[2,3]*100,2)`% of fradulent credit transactions. Additionally, we can see the class error is `r round(h2o.confusionMatrix(RFt,metrics="f2")[1,3]*100,2)`%
+  
+Finally, let us also take a look at the importance of different variables for this model. Since we don't have background informaiton on these variables, we comment on the characterisitcs.
+  
+```{r}
+ggplot(data.table(cbind(h2o.varimp(RFb)$variable[1:10],h2o.varimp(RFb)$scaled_importance[1:10],h2o.varimp(RFb)$relative_importance[1:10])))+
+  geom_col(aes(x=V1,y=as.numeric(V2),fill=as.numeric(V3)))+coord_flip()+scale_x_discrete(limits=rev(h2o.varimp(RFb)$variable[1:10]))+
+  scale_y_continuous(breaks=seq(0,1,0.25))+
+  theme(axis.ticks=element_blank())+ylab("Relative Importance")+xlab("Variable")+
+  scale_fill_distiller(palette="Spectral",guide=F)
+```
+  
+## 2. Gradienst Boosted Machine with Cross Validation
+We have used a grid search with GBM Forest while varying learn_rate and max_depth. The number of trees selected is 100 and we have also applied k=5 cross validation.
+  
+```{r warning=FALSE, message=FALSE,, echo=FALSE}
+h2o.rm("GBM")
+GBM<-h2o.grid(
+  algorithm = "gbm", 
+  grid_id = "GBM",
+  hyper_params = list(learn_rate=c(0.06,0.07,0.09,0.1),max_depth=c(4,5,6,7)),
+  training_frame = h2o_data$train,
+  validation_frame = h2o_data$valid,
+  x=colnames(h2o_data$train)[-31],
+  y="Class",
+  seed=1234,
+  ntrees=100, nfolds=5
+)
+```
+  
+The output of the grid search that gives us the best parameters for Random Forest can be obtained fromt he following section -
+  
+```{r message=FALSE,warning=FALSE}
+GBMm<-h2o.getGrid(
+  grid_id = "GBM", 
+  sort_by = "F2",
+  decreasing = TRUE
+)
+GBMm
+GBMb<- h2o.getModel(GBMm@model_ids[[1]])
+```
+  
+The grid search for GBM reveals the sweet spot is `r GBMb@parameters$max_depth` as max_depth and `r GBMb@parameters$learn_rate` as learn_rate.
+   
+The resulting performance metrics from the algorithm are -
+```{r message=FALSE, warning=FALSE}
+GBMp<-h2o.performance(GBMb,xval=T)
+GBMrp<-cbind(h2o.fpr(GBMp),h2o.tpr(GBMp)$tpr)
+colnames(GBMrp)[3]<-"tpr"
+GBMt<-h2o.performance(GBMb,newdata = h2o_data$test)
+GBMrt<-cbind(h2o.fpr(GBMt),h2o.tpr(GBMt)$tpr)
+colnames(GBMrt)[3]<-"tpr"
+```
+  
+Comparing the AUC of the two sets, we get `r round(h2o.auc(GBMp),4)` for the validation set and `r round(h2o.auc(GBMt),4)` for the test set.
+  
+The next set of graphs will show the F2 metric variation across the Threshold and the ROC curve -
+  
+``` {r message=FALSE,warning=FALSE}
+GBMev<-ggplot(h2o.F2(GBMp))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+GBMet<-ggplot(h2o.F2(GBMt))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+GBMav<-ggplot(GBMrp,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+GBMat<-ggplot(GBMrt,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+```
+  
+```{r fig.cap="F2-Threshold curve and ROC curve for validation set"}
+grid.arrange(GBMev,GBMav,ncol=1)
+```
+  
+```{r fig.cap="F2-Threshold curve and ROC curve for validation set"}
+grid.arrange(GBMev,GBMav,ncol=1)
+```
+  
+Let us also take a look at the confusion matrix of the validation and test sets, respectively.  
+  
+  
+Validation set:  
+```{r }
+pander(h2o.confusionMatrix(GBMp,metrics="f2")[,1:3])
+```
+  
+Test set:  
+```{r }
+pander(h2o.confusionMatrix(GBMt,metrics="f2")[,1:3])
+```
+  
+As can be seen from the confusion matrix of the test set, we failed to identify `r round(h2o.confusionMatrix(GBMt,metrics="f2")[2,3]*100,2)`% of fradulent credit transactions. Additionally, we can see the class error is `r round(h2o.confusionMatrix(GBMt,metrics="f2")[1,3]*100,2)`%
+  
+Finally, let us also take a look at the importance of different variables for this model. Since we don't have background informaiton on these variables, we comment on the characterisitcs.
+  
+```{r}
+ggplot(data.table(cbind(h2o.varimp(GBMb)$variable[1:10],h2o.varimp(GBMb)$scaled_importance[1:10],h2o.varimp(GBMb)$relative_importance[1:10])))+
+  geom_col(aes(x=V1,y=as.numeric(V2),fill=as.numeric(V3)))+coord_flip()+scale_x_discrete(limits=rev(h2o.varimp(GBMb)$variable[1:10]))+
+  scale_y_continuous(breaks=seq(0,1,0.25))+
+  theme(axis.ticks=element_blank())+ylab("Relative Importance")+xlab("Variable")+
+  scale_fill_distiller(palette="Spectral",guide=F)
+```
+  
+## 3. NN Deep Learning with Grid Search and Cross Validation
+We have used a grid search with the NN model while varying rate and activation.
+  
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+h2o.rm("NN")
+NN<-h2o.grid(
+  algorithm = "deeplearning", 
+  grid_id = "NN",
+  hyper_params = list(rate=c(0.03,0.04,0.05,0.06),activation=c("Tanh","Rectifier","RectifierWithDropout")),
+  training_frame = h2o_data$train,
+  validation_frame = h2o_data$valid,
+  x=colnames(h2o_data$train)[-31],
+  y="Class",
+  seed=1234, nfolds=5
+)
+```
+  
+The output of the grid search that gives us the best parameters for NN Deep Learning can be obtained fromt he following section -
+  
+```{r message=FALSE,warning=FALSE}
+NNm<-h2o.getGrid(
+  grid_id = "NN", 
+  sort_by = "F2",
+  decreasing = TRUE
+)
+NNb<- h2o.getModel(NNm@model_ids[[1]])
+```
+  
+The grid search for GBM reveals the sweet spot is `r NNb@parameters$rate` as rate and `r NNb@parameters$activation` as activation.
+   
+The resulting performance metrics from the algorithm are -
+```{r message=FALSE, warning=FALSE}
+NNp<-h2o.performance(NNb,xval=T)
+NNrp<-cbind(h2o.fpr(NNp),h2o.tpr(NNp)$tpr)
+colnames(NNrp)[3]<-"tpr"
+NNt<-h2o.performance(NNb,newdata = h2o_data$test)
+NNrt<-cbind(h2o.fpr(NNt),h2o.tpr(NNt)$tpr)
+colnames(NNrt)[3]<-"tpr"
+```
+  
+Comparing the AUC of the two sets, we get `r round(h2o.auc(NNp),4)` for the validation set and `r round(h2o.auc(NNt),4)` for the test set.
+  
+The next set of graphs will show the F2 metric variation across the Threshold and the ROC curve -
+  
+```{r message=FALSE,warning=FALSE}
+NNev<-ggplot(h2o.F2(NNp))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+NNet<-ggplot(h2o.F2(NNt))+geom_line(aes(x=threshold,y=f2,color=threshold),size=1)+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  xlab("Threshold")+ylab("F2 Metric")
+NNav<-ggplot(NNrp,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+NNat<-ggplot(NNrt,aes(x=fpr,y=tpr))+geom_line(aes(col=threshold),size=1)+xlab("False Positive Rate")+ylab("True Positive Rate")+
+  scale_color_gradient2("Threshold",low="red",high="green",mid="yellow",midpoint = 0.5)+
+  geom_segment(x=0,y=0,xend=1,yend=1,size=1,col="#00BFC4")
+```
+  
+```{r fig.cap="F2-Threshold curve and ROC curve for validation set"}
+grid.arrange(NNev,NNav,ncol=1)
+```
+
+```{r fig.cap="F2-Threshold curve and ROC curve for validation set"}
+grid.arrange(NNet,NNat,ncol=1)
+```
+  
+Let us also take a look at the confusion matrix of the validation and test sets, respectively.  
+  
+  
+Validation set:  
+```{r }
+pander(h2o.confusionMatrix(NNp,metrics="f2")[,1:3])
+```
+  
+Test set:  
+```{r }
+pander(h2o.confusionMatrix(NNt,metrics="f2")[,1:3])
+```
+  
+As can be seen from the confusion matrix of the test set, we failed to identify `r round(h2o.confusionMatrix(NNt,metrics="f2")[2,3]*100,2)`% of fradulent credit transactions. Additionally, we can see the class error is `r round(h2o.confusionMatrix(NNt,metrics="f2")[1,3]*100,2)`%
+  
+
+# Results
+## 4. Results and Conclusion  
+  
+After running all models, I summarize AUC, F2 Score and Classification error for test set, in the following table.  
+  
+  
+| Metrics | NN | RF | GBM |
+|---|:----:|:----:|:----:|
+|AUC|`r round(as.numeric(h2o.auc(NNt)),4)`|`r round(as.numeric(h2o.auc(RFt)),4)`|`r round(as.numeric(h2o.auc(GBMt)),4)`| 
+|F2|`r round(as.numeric(h2o.F2(NNt,thresholds = h2o.find_threshold_by_max_metric(NNt,metric="f2"))),4)`|`r round(as.numeric(h2o.F2(RFt,thresholds = h2o.find_threshold_by_max_metric(RFt,metric="f2"))),4)`|`r round(as.numeric(h2o.F2(GBMt,thresholds = h2o.find_threshold_by_max_metric(GBMt,metric="f2"))),4)`| 
+|Error (FN/P)|`r round(as.numeric(h2o.confusionMatrix(NNt,metrics="f2")[2,3]),4)`|`r round(as.numeric(h2o.confusionMatrix(RFt,metrics="f2")[2,3]),4)`|`r round(as.numeric(h2o.confusionMatrix(GBMt,metrics="f2")[2,3]),4)`| 
+|Error (FP/N)|`r round(as.numeric(h2o.confusionMatrix(NNt,metrics="f2")[1,3]),4)`|`r round(as.numeric(h2o.confusionMatrix(RFt,metrics="f2")[1,3]),4)`|`r round(as.numeric(h2o.confusionMatrix(GBMt,metrics="f2")[1,3]),4)`|
+
+From the above table, if we compare the AUC and F2 measure, we will be ablet conclude that the best performance for this data set and problem has been obtained using Random Forest method with Cross Validation. Of course, it may be possible that there is bias towards the majority class but we have tried to avoid using synthetic data generation and stick to performance metrics that are better predictive in case of imbalanced data.
+  
+# Improvements
+  
+Several research papers have commented on the usefulness of sampling and synthetic generation techniques to balance data. A popular algorithm developed and widely used for the latter purpose is called ROSE. As an addition to this paper, I would consider it a logical progression to balance the data using ROSE and compare the results.
+
+```{r}
+h2o.shutdown()
+```
